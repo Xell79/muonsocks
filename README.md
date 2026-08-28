@@ -16,6 +16,8 @@ changes:
 * Use lock-free list rather than dynamic array for threads
 * Minimal memory allocations after init, and low heap fragmentation
 * Enhanced error handling
+* Fixed security vulnerabilities (MS-01 through MS-11),
+  buffer bounds, RFC 1929 compliance, and compiler hardening
 
 muonsocks fully supports SOCKS5 and SOCKS4a TCP proxying as a server.
 
@@ -24,7 +26,7 @@ are set by the available RAM and file descriptor limits. OOM does not
 cause termination, and explicit memory allocation and heap
 fragmentation are minimized.
 
-It is ~1000 LoC compared to microsocks's ~600 LoC, so it is not
+It is ~1100 LoC compared to microsocks's ~600 LoC, so it is not
 as minimal, but it is still a very small program (~27KiB dynamically
 linked to glibc on amd64).
 
@@ -33,142 +35,173 @@ linked to glibc on amd64).
 * Linux or BSD system
 * GCC or Clang
 * GNU Make
+* Python 3 (optional, for regression tests)
 
-## Standard Usage
+## Installation and Quick Start
 
-Compile and install muonsocks.
+### 1. Automated Installation & Updates (systemd)
 
-* Build muonsocks: `make`
-* Install the `muonsocks` executable in a normal place. I suggest
-  `/usr/local/bin`.
-
-Set up the user account and chroot directory for muonsocks. Example:
+To install or update muonsocks automatically as a systemd daemon:
 
 ```sh
-su -
-# umask 077
-# groupadd muonsocks
-# useradd -d /var/empty -s /sbin/nologin -g muonsocks muonsocks
+sudo ./install.sh
 ```
 
-Then the program can be run similarly to:
+To pull the latest git commits, rebuild, and restart the daemon:
 
-`# muonsocks -u muonsocks -C /var/empty -4 -i 192.168.0.1 -i 10.0.0.1 -p 1080`
+```sh
+sudo ./install.sh --update
+```
 
-Which would run a SOCKS5 server listening for requests on 192.168.0.1:1080 and
-10.0.0.1:1080 that would only send outgoing IPv4 requests.
+The installer:
 
-I suggest running muonsocks from a process supervisor such as
-[s6](http://www.skarnet.org/software/s6). This will allow for reliable
-functioning in the case of unforeseen or unrecoverable errors.
+* Compiles `muonsocks` with all security hardening flags.
+* Runs the test suite (`make test`).
+* Creates the system user `muonsocks` if missing.
+* Installs the binary to `/usr/local/bin/muonsocks`.
+* Installs the configuration template `/etc/default/muonsocks`
+  (preserving any existing config).
+* Installs, enables, and starts `/etc/systemd/system/muonsocks.service`.
 
-For full information on command line options, run:
+### 2. Manual Build
 
-`$ muonsocks -?`
+Compile and install muonsocks manually:
 
-## Security notes
+```sh
+make
+sudo make install
+```
 
-* Destination CONNECT to loopback and unspecified addresses is refused:
-  IPv4 `127.0.0.0/8` and `0.0.0.0/8`, IPv6 `::1` and `::`, plus IPv4-mapped
-  and IPv4-compatible IPv6 forms (`::ffff:127.0.0.1`, `::ffff:0.0.0.0`).
-* Default listen address is still `0.0.0.0:1080` with no authentication.
-  Running without `-U`/`-P` on a wildcard address prints a warning; do not
-  expose an unauthenticated proxy to untrusted networks.
-* `-p` must be an integer in `1..65535` (values such as `70000` are rejected
-  rather than wrapped).
-* `-C` (chroot) as root requires `-u` (drop uid).
-* RFC1929 username/password success replies with status `0x00`.
+To run localhost regression tests:
 
-`make test` runs `test_security.py` against the built binary (localhost only).
+```sh
+make test
+```
 
-## History / Rationale
+## Systemd Service and Configuration
 
-I previously used a SOCKS server that I wrote called nsocks. It used an
-event-driven model that attempted to use Linux's splice() to reduce
-kernel->userspace->kernel copies. However, the event-driven model
-works better for pure servers such as HTTP than for proxies; buffering
-is challenging to properly control in all cases for an event-driven
-proxy, but is natural with threads and careful use of blocking writes.
-splice() also gave marginal performance gains but made the program
-significantly more complex.
+The daemon configuration is stored in `/etc/default/muonsocks`.
 
-I ended up using the original microsocks when I became tired of trying
-to fix the many corner-cases in nsocks, and I expected to only use
-it temporarily; there were some features I needed, which I added,
-and I ported over some parts of nsocks that were well-tested such
-as the SOCKS4 support. Since nsocks was written in C++, I simply
-used C++ rather than porting my own code to C.
+### Example Configurations
 
-After relatively little work, my local version of microsocks (which I
-ended up calling muonsocks) worked trouble-free, and I ended up with
-no motivation to write another server. A few years later, I ended up
-porting back to C and making further improvements.
+Running without authentication on default port 1080:
 
-## Downloads
+```sh
+MUONSOCKS_OPTS="-p 1080 -v"
+```
 
-* [GitLab](https://gitlab.com/niklata/muonsocks)
-* [Codeberg](https://codeberg.org/niklata/muonsocks)
-* [BitBucket](https://bitbucket.com/niklata/muonsocks)
-* [GitHub](https://github.com/niklata/muonsocks)
+Running with username/password authentication (RFC 1929):
 
-## Original microsocks README below
+```sh
+MUONSOCKS_OPTS="-p 1080 -v -U myuser -P mysecretpassword"
+```
 
-## MicroSocks - multithreaded, small, efficient SOCKS5 server
+Running with `auth_once` mode (whitelists client IP after first successful auth):
 
-===========================================================
+```sh
+MUONSOCKS_OPTS="-p 1080 -v -U myuser -P mysecretpassword -1"
+```
 
-a SOCKS5 service that you can run on your remote boxes to tunnel connections
-through them, if for some reason SSH doesn't cut it for you.
+Listening only on specific interfaces (e.g. localhost or VPN):
 
-It's very lightweight, and very light on resources too:
+```sh
+MUONSOCKS_OPTS="-i 127.0.0.1 -p 1080 -v"
+```
 
-for every client, a thread with a stack size of 8KB is spawned.
-the main process basically doesn't consume any resources at all.
+After modifying `/etc/default/muonsocks`, restart the service:
 
-the only limits are the amount of file descriptors and the RAM.
+```sh
+sudo systemctl restart muonsocks
+```
 
-It's also designed to be robust: it handles resource exhaustion
-gracefully by simply denying new connections, instead of calling abort()
-as most other programs do these days.
+Check status and logs:
 
-another plus is ease-of-use: no config file necessary, everything can be
-done from the command line and doesn't even need any parameters for quick
-setup.
+```sh
+sudo systemctl status muonsocks
+sudo journalctl -u muonsocks -f
+```
 
-### History
+## Client Connection Examples
 
--------
+### 1. curl
 
-This is the successor of "rocksocks5", and it was written with
-different goals in mind:
+Without authentication:
 
-* prefer usage of standard libc functions over homegrown ones
-* no artificial limits
-* do not aim for minimal binary size, but for minimal source code size,
-  and maximal readability, reusability, and extensibility.
+```sh
+curl -s -x socks5h://127.0.0.1:1080 https://ifconfig.me
+```
 
-as a result of that, ipv4, dns, and ipv6 is supported out of the box
-and can use the same code, while rocksocks5 has several compile time
-defines to bring down the size of the resulting binary to extreme values
-like 10 KB static linked when only ipv4 support is enabled.
+With username and password (RFC 1929):
 
-still, if optimized for size, *this* program when static linked against musl
-libc is not even 50 KB. that's easily usable even on the cheapest routers.
+```sh
+curl -s -x socks5h://myuser:mysecretpassword@127.0.0.1:1080 https://ifconfig.me
+```
 
-### command line options
+*(Note: `socks5h://` instructs curl to perform DNS resolution
+remotely on the proxy server).*
 
--------
+### 2. Browsers and Proxy Clients
+
+In browser SOCKS5 proxy settings (or FoxyProxy, SwitchyOmega, ProxyChains):
+
+* **SOCKS Host**: `127.0.0.1` (or your proxy IP)
+* **Port**: `1080`
+* **SOCKS version**: SOCKS v5
+* **Proxy DNS when using SOCKS v5**: Checked / Enabled
+* **Username / Password**: Enter configured `-U` and `-P` credentials (if enabled)
+
+## Command Line Options
 
 ```text
 muonsocks -1 -i listenip -p port -U user -P password -b bindaddr
 ```
 
-all arguments are optional.
-by default listenip is 0.0.0.0 and port 1080.
+* `-i <ip>`: Listen IP (default: `0.0.0.0`, can be specified
+  multiple times for multiple interfaces/IPs).
+* `-p <port>`: Listen port (default: `1080`, range `1..65535`).
+* `-U <user>`: Username for SOCKS5 RFC 1929 authentication.
+* `-P <password>`: Password for SOCKS5 RFC 1929 authentication
+  (must be used together with `-U`).
+* `-1`: Activates `auth_once` mode: once a client IP
+  authenticates successfully with user/password, it is added
+  to an in-memory whitelist and can use the proxy without
+  re-authenticating.
+* `-v`: Enables verbose connection and disconnection logging to stderr/journal.
+* `-4`: Disables outgoing IPv6 connections (IPv4 only).
+* `-6`: Disables outgoing IPv4 connections (IPv6 only).
+* `-b <ip>`: Binds outgoing connections to a specific source IP.
+* `-u <user>`: Drops privileges and runs as specified system user.
+* `-C <dir>`: Chroots to the specified directory before dropping privileges.
+* `-d <fd>`: Specifies s6 notification file descriptor.
 
-option -1 activates auth_once mode: once a specific ip address
-authed successfully with user/pass, it is added to a whitelist
-and may use the proxy without auth.
-this is handy for programs like firefox that don't support
-user/pass auth. for it to work you'd basically make one connection
-with another program that supports it, and then you can use firefox too.
+## Security Notes
+
+* Destination CONNECT to loopback and unspecified addresses is refused:
+  IPv4 `127.0.0.0/8` and `0.0.0.0/8`, IPv6 `::1` and `::`, plus IPv4-mapped
+  and IPv4-compatible IPv6 forms (`::ffff:127.0.0.1`, `::ffff:0.0.0.0`).
+* Default listen address is `0.0.0.0:1080` with no authentication.
+  Running without `-U`/`-P` on a wildcard address prints a warning; do not
+  expose an unauthenticated proxy to untrusted networks.
+* `-p` must be an integer in `1..65535` (out-of-range values are rejected).
+* `-C` (chroot) as root requires `-u` (drop uid).
+* RFC 1929 username/password success replies with status `0x00`.
+* Binary built with `-fstack-protector-strong`,
+  `_FORTIFY_SOURCE=2`, RELRO, and `BIND_NOW`.
+
+`make test` runs `test_security.py` against the built binary (localhost only).
+
+## Rationale and History
+
+muonsocks is a multithreaded, small, and efficient
+SOCKS5/SOCKS4a server derived from rofl0r's microsocks.
+It optimizes connection handling using threads and blocking
+socket writes with `TCP_NODELAY`, lock-free list recycling
+for thread metadata, minimal heap allocation after
+initialization, and robust resource exhaustion handling.
+
+## Upstream Links
+
+* [GitLab](https://gitlab.com/niklata/muonsocks)
+* [Codeberg](https://codeberg.org/niklata/muonsocks)
+* [BitBucket](https://bitbucket.com/niklata/muonsocks)
+* [GitHub](https://github.com/niklata/muonsocks)

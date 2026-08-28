@@ -1,0 +1,20 @@
+# Configuration options for muonsocks SOCKS proxy daemon
+# Loaded by /etc/systemd/system/muonsocks.service
+#
+# Available options:
+#   -i <ip>       Listen IP (default: 0.0.0.0, can be specified multiple times)
+#   -p <port>     Listen port (default: 1080, range 1..65535)
+#   -U <user>     Username for SOCKS5 RFC1929 authentication
+#   -P <pass>     Password for SOCKS5 RFC1929 authentication
+#   -1            auth_once mode (whitelist IP after first successful auth)
+#   -4 / -6       Disable outgoing IPv6 / IPv4 respectively
+#   -b <ip>       Bind outgoing connections to specific IP
+#   -v            Enable verbose connection logging to stderr/journal
+#
+# Example without auth:
+# MUONSOCKS_OPTS="-p 1080 -v"
+#
+# Example with username/password authentication:
+# MUONSOCKS_OPTS="-p 1080 -v -U myuser -P mypassword"
+#
+MUONSOCKS_OPTS="-p 1080 -v"

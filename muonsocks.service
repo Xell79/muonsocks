@@ -1,0 +1,33 @@
+[Unit]
+Description=muonsocks SOCKS5/SOCKS4a proxy server
+After=network.target network-online.target
+Wants=network-online.target
+Documentation=https://github.com/Xell79/muonsocks
+
+[Service]
+Type=simple
+User=muonsocks
+Group=muonsocks
+EnvironmentFile=-/etc/default/muonsocks
+ExecStart=/usr/local/bin/muonsocks $MUONSOCKS_OPTS
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+# Hardening / Sandboxing
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target
