@@ -9,13 +9,34 @@ C_SRCS =  $(sort nk/privs.c main.c)
 OBJS = $(C_SRCS:.c=.o) $(CXX_SRCS:.cc=.o)
 DEPS = $(C_SRCS:.c=.d) $(CXX_SRCS:.cc=.d)
 
-CFLAGS = -MMD -O2 -flto -s -DNDEBUG -std=c17 -I. -Wall -pedantic -Wextra -Wformat=2 -Wformat-nonliteral -Wformat-security -Wshadow -Wpointer-arith -Wmissing-prototypes -Wcast-qual -Wsign-conversion -Wstrict-overflow=5 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 -D_GNU_SOURCE
+WARN_CFLAGS = -Wall -pedantic -Wextra -Wformat=2 -Wformat-nonliteral \
+	-Wformat-security -Wshadow -Wpointer-arith -Wmissing-prototypes \
+	-Wcast-qual -Wsign-conversion -Wstrict-overflow=5
+HARDEN_CFLAGS = -fstack-protector-strong -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2
+HARDEN_LDFLAGS = -Wl,-z,relro,-z,now
+
+CFLAGS = -MMD -O2 -flto -s -DNDEBUG -std=c17 -I. \
+	-D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 -D_GNU_SOURCE
 CPPFLAGS += $(INC)
 
 #CFLAGS += -fsanitize=undefined
 #LDFLAGS += -fsanitize=undefined
 
 -include config.mak
+
+# Keep warnings even if config.mak replaces CFLAGS.
+CFLAGS += $(WARN_CFLAGS)
+
+# make SANITIZE=address,undefined — drop hardening that fights sanitizers
+SANITIZE ?=
+ifneq ($(SANITIZE),)
+CFLAGS = -MMD -O1 -g -fno-omit-frame-pointer -std=c17 -I. $(WARN_CFLAGS) \
+	-fsanitize=$(SANITIZE) -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 -D_GNU_SOURCE
+LDFLAGS = -fsanitize=$(SANITIZE)
+else
+CFLAGS += $(HARDEN_CFLAGS)
+LDFLAGS += $(HARDEN_LDFLAGS)
+endif
 
 all: $(PROG)
 
@@ -28,8 +49,10 @@ install: $(PROG)
 	install -d $(DESTDIR)/$(bindir)
 	install -D -m 755 $(PROG) $(DESTDIR)/$(bindir)/$(PROG)
 
+test: $(PROG)
+	python3 test_security.py ./$(PROG)
+
 clean:
 	rm -f $(PROG) $(OBJS) $(DEPS)
 
-.PHONY: all clean install
-
+.PHONY: all clean install test
