@@ -1,8 +1,12 @@
 # if you want to change/override some variables, do so in a file called
 # config.mak, which is gets included automatically if it exists.
 
-prefix = /usr/local
-bindir = $(prefix)/bin
+prefix ?= /usr/local
+exec_prefix ?= $(prefix)
+bindir ?= $(exec_prefix)/bin
+sysconfdir ?= /etc
+systemdunitdir ?= /etc/systemd/system
+SERVICE_USER ?= muonsocks
 
 PROG = muonsocks
 C_SRCS =  $(sort nk/privs.c main.c)
@@ -46,13 +50,22 @@ $(PROG): $(OBJS)
 -include $(DEPS)
 
 install: $(PROG)
-	install -d $(DESTDIR)/$(bindir)
-	install -D -m 755 $(PROG) $(DESTDIR)/$(bindir)/$(PROG)
+	DESTDIR="$(DESTDIR)" prefix="$(prefix)" bindir="$(bindir)" \
+	sysconfdir="$(sysconfdir)" systemdunitdir="$(systemdunitdir)" \
+	SERVICE_USER="$(SERVICE_USER)" PROG="$(PROG)" ./install.sh
+
+uninstall:
+	DESTDIR="$(DESTDIR)" prefix="$(prefix)" bindir="$(bindir)" \
+	sysconfdir="$(sysconfdir)" systemdunitdir="$(systemdunitdir)" \
+	SERVICE_USER="$(SERVICE_USER)" PROG="$(PROG)" ./install.sh --uninstall
+
+update:
+	./install.sh --update
 
 test: $(PROG)
-	python3 test_security.py ./$(PROG)
+	python3 tests/test_security.py ./$(PROG)
 
 clean:
 	rm -f $(PROG) $(OBJS) $(DEPS)
 
-.PHONY: all clean install test
+.PHONY: all clean install uninstall update test

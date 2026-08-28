@@ -39,38 +39,44 @@ linked to glibc on amd64).
 
 ## Installation and Quick Start
 
-### 1. Automated Installation & Updates (systemd)
+### 1. Build and Install (systemd)
 
-To install or update muonsocks automatically as a systemd daemon:
-
-```sh
-sudo ./install.sh
-```
-
-To pull the latest git commits, rebuild, and restart the daemon:
-
-```sh
-sudo ./install.sh --update
-```
-
-The installer:
-
-* Compiles `muonsocks` with all security hardening flags.
-* Runs the test suite (`make test`).
-* Creates the system user `muonsocks` if missing.
-* Installs the binary to `/usr/local/bin/muonsocks`.
-* Installs the configuration template `/etc/default/muonsocks`
-  (preserving any existing config).
-* Installs, enables, and starts `/etc/systemd/system/muonsocks.service`.
-
-### 2. Manual Build
-
-Compile and install muonsocks manually:
+To compile, run regression tests, and install muonsocks as a systemd daemon:
 
 ```sh
 make
 sudo make install
 ```
+
+Or run the installer script directly:
+
+```sh
+sudo ./install.sh
+```
+
+To pull the latest git commits, rebuild, and update the daemon:
+
+```sh
+sudo make update
+```
+*(or `sudo ./install.sh --update`)*
+
+To uninstall:
+
+```sh
+sudo make uninstall
+```
+
+The installer:
+
+* Creates the system user `muonsocks` if missing (customizable via `SERVICE_USER=`).
+* Installs the binary to `/usr/local/bin/muonsocks` (customizable via `prefix=` / `bindir=`).
+* Installs the configuration template `/etc/default/muonsocks`
+  (preserving any existing config).
+* Installs, enables, and starts `/etc/systemd/system/muonsocks.service`.
+* Supports staged packaging installations via `DESTDIR=`.
+
+### 2. Running Regression Tests
 
 To run localhost regression tests:
 
@@ -188,7 +194,8 @@ muonsocks -1 -i listenip -p port -U user -P password -b bindaddr
 * Binary built with `-fstack-protector-strong`,
   `_FORTIFY_SOURCE=2`, RELRO, and `BIND_NOW`.
 
-`make test` runs `test_security.py` against the built binary (localhost only).
+`make test` runs the security regression suite (`tests/test_security.py`)
+against the built binary (localhost only; see `tests/README.md`).
 
 ## Rationale and History
 

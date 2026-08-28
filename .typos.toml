@@ -1,0 +1,5 @@
+[default.extend-words]
+# clen = client length in C (socklen_t)
+clen = "clen"
+# mak = .mak file extension for Makefile includes
+mak = "mak"
