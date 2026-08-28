@@ -20,7 +20,7 @@ changes:
 muonsocks fully supports SOCKS5 and SOCKS4a TCP proxying as a server.
 
 It inherits the good design from microsocks, so the only real limits
-are set by the available RAM and file descriptor limits.  OOM does not
+are set by the available RAM and file descriptor limits. OOM does not
 cause termination, and explicit memory allocation and heap
 fragmentation are minimized.
 
@@ -37,12 +37,14 @@ linked to glibc on amd64).
 ## Standard Usage
 
 Compile and install muonsocks.
+
 * Build muonsocks: `make`
-* Install the `muonsocks` executable in a normal place.  I suggest
+* Install the `muonsocks` executable in a normal place. I suggest
   `/usr/local/bin`.
 
-Set up the user account and chroot directory for muonsocks.  Example:
-```
+Set up the user account and chroot directory for muonsocks. Example:
+
+```sh
 $ su -
 # umask 077
 # groupadd muonsocks
@@ -58,11 +60,26 @@ Which would run a SOCKS5 server listening for requests on 192.168.0.1:1080 and
 
 I suggest running muonsocks from a process supervisor such as
 [s6](http://www.skarnet.org/software/s6).  This will allow for reliable
-functioning in the case of unforseen or unrecoverable errors.
+functioning in the case of unforeseen or unrecoverable errors.
 
 For full information on command line options, run:
 
 `$ muonsocks -?`
+
+## Security notes
+
+* Destination CONNECT to loopback and unspecified addresses is refused:
+  IPv4 `127.0.0.0/8` and `0.0.0.0/8`, IPv6 `::1` and `::`, plus IPv4-mapped
+  and IPv4-compatible IPv6 forms (`::ffff:127.0.0.1`, `::ffff:0.0.0.0`).
+* Default listen address is still `0.0.0.0:1080` with no authentication.
+  Running without `-U`/`-P` on a wildcard address prints a warning; do not
+  expose an unauthenticated proxy to untrusted networks.
+* `-p` must be an integer in `1..65535` (values such as `70000` are rejected
+  rather than wrapped).
+* `-C` (chroot) as root requires `-u` (drop uid).
+* RFC1929 username/password success replies with status `0x00`.
+
+`make test` runs `test_security.py` against the built binary (localhost only).
 
 ## History / Rationale
 
@@ -150,4 +167,3 @@ and may use the proxy without auth.
 this is handy for programs like firefox that don't support
 user/pass auth. for it to work you'd basically make one connection
 with another program that supports it, and then you can use firefox too.
-

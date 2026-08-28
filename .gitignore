@@ -1,4 +1,40 @@
+# Compiled binaries, object files, dependency files
 *.o
 *.d
+*.a
+*.so
 muonsocks
+muonsocks-*
 
+# Local configuration overrides
+config.mak
+
+# Debugging, core dumps & sanitizers
+core
+core.*
+vgcore.*
+*.gcno
+*.gcda
+*.gcov
+
+# Python test & linter artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.rumdl_cache/
+.coverage
+htmlcov/
+
+# Editor & OS files
+.DS_Store
+*~
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Kilo & AI tools
+.codegraph/
+.kilo/
