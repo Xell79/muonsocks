@@ -24,6 +24,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <assert.h>
+#include <stdint.h>
 #include <stdatomic.h>
 #include "sockunion.h"
 #include "nk/privs.h"
@@ -70,6 +71,10 @@
 #define BUF_SIZE 8640
 #define MAX_BATCH 15
 #endif
+
+/* Parser buffer is independent of copyloop BUF_SIZE (MS-01). */
+#define SOCKS_BUF_SIZE 1024
+#define MAX_AUTH_IPS 4096
 
 // struct thread is allocated in blocks
 #define THREAD_BLOCK_SIZE 64
@@ -354,14 +359,28 @@ static int is_in_authed_list(union sockaddr_union *caddr) {
     return 0;
 }
 
-static void add_auth_ip(union sockaddr_union *caddr) {
-    auth_ips = reallocarray(auth_ips, nauth_ips + 1, sizeof(union sockaddr_union));
-    if (!auth_ips) perror("reallocarray");
-    memcpy(auth_ips + (nauth_ips++), caddr, sizeof *caddr);
+static bool add_auth_ip(union sockaddr_union *caddr)
+{
+    if (is_in_authed_list(caddr))
+        return true;
+    if (nauth_ips >= MAX_AUTH_IPS) {
+        dprintf(2, "auth_ips: refusing to grow past %d entries\n", MAX_AUTH_IPS);
+        return false;
+    }
+    union sockaddr_union *grown = reallocarray(auth_ips, nauth_ips + 1,
+                                               sizeof(union sockaddr_union));
+    if (!grown) {
+        perror("reallocarray");
+        return false;
+    }
+    auth_ips = grown;
+    memcpy(auth_ips + nauth_ips, caddr, sizeof *caddr);
+    nauth_ips++;
+    return true;
 }
 
-static int send_auth_response(int fd, char version, enum authmethod method) {
-    char buf[2] = { version, method };
+static int send_auth_response(int fd, unsigned char version, unsigned char status) {
+    unsigned char buf[2] = { version, status };
     for (;;) {
         ssize_t r = write(fd, buf, sizeof buf);
         if (r == -1 && errno == EINTR) continue;
@@ -497,10 +516,13 @@ read_retry:
     }
 }
 
-static bool extend_cbuf(const struct thread *t, char *buf, size_t *buflen)
+static bool extend_cbuf(const struct thread *t, unsigned char *buf,
+                        size_t *buflen, size_t cap)
 {
+    if (*buflen >= cap)
+        return false;
     for (;;) {
-        ssize_t n = read(t->client.fd, buf + *buflen, BUF_SIZE - *buflen);
+        ssize_t n = read(t->client.fd, buf + *buflen, cap - *buflen);
         if (n == 0) {
             return false;
         } else if (n < 0) {
@@ -512,7 +534,9 @@ static bool extend_cbuf(const struct thread *t, char *buf, size_t *buflen)
     }
 }
 
-#define EXTEND_BUF() do { if (!extend_cbuf(t, buf, &buflen)) return -1; } while (0)
+#define EXTEND_BUF() do { \
+    if (!extend_cbuf(t, buf, &buflen, sizeof buf)) return -1; \
+} while (0)
 #define RESET_BUF() do { buflen = 0; } while (0)
 
 static enum errorcode errno_to_sockscode(void)
@@ -537,34 +561,71 @@ static enum errorcode errno_to_sockscode(void)
     }
 }
 
-static bool is_banned(int family, const struct addrinfo *remote)
+static bool ipv4_prefix_match(const struct in_addr *addr, const struct in_addr *net,
+                              uint32_t mask)
+{
+    uint32_t m = mask > 32 ? 32 : mask;
+    uint32_t a = ntohl(addr->s_addr);
+    uint32_t n = ntohl(net->s_addr);
+    uint32_t bits = (m == 0) ? 0u : (m == 32 ? 0xffffffffu : (~0u << (32 - m)));
+    return (a & bits) == (n & bits);
+}
+
+static bool ipv6_prefix_match(const struct in6_addr *addr, const struct in6_addr *net,
+                              uint32_t mask)
+{
+    uint32_t m = mask > 128 ? 128 : mask;
+    unsigned char abuf[16], bbuf[16];
+    memcpy(abuf, addr, 16);
+    memcpy(bbuf, net, 16);
+    unsigned char *p = abuf, *q = bbuf;
+    for (; m >= 8; ++p, ++q, m -= 8) {
+        if (*p != *q) return false;
+    }
+    if (m > 0) {
+        unsigned char c = (unsigned char)(0xffu << (8 - m));
+        if ((*p & c) != (*q & c)) return false;
+    }
+    return true;
+}
+
+static bool ipv4_is_banned(const struct in_addr *addr)
 {
     for (size_t i = 0; i < nban_dest; ++i) {
-        if (ban_dest[i].fam == family) {
-            unsigned char abuf[16], bbuf[16];
-            size_t addrsize = family == AF_INET ? 4 : 16;
-            struct sockaddr_in *ai4 = (struct sockaddr_in *)remote->ai_addr;
-            struct sockaddr_in6 *ai6 = (struct sockaddr_in6 *)remote->ai_addr;
-            memcpy(abuf, family == AF_INET ? (const void *)&ai4->sin_addr
-                                           : (const void *)&ai6->sin6_addr, addrsize);
-            memcpy(bbuf, family == AF_INET ? (const void *)&ban_dest[i].addr4
-                                           : (const void *)&ban_dest[i].addr6, addrsize);
-            unsigned char *p = abuf, *q = bbuf;
-            uint32_t m = ban_dest[i].mask;
-            if (family == AF_INET6 && m > 128) m = 128;
-            if (family == AF_INET && m > 32) m = 32;
-            for (;m >= 8; ++p, ++q, m -= 8) {
-                if (*p != *q) return false;
-            }
-            if (m > 0) {
-                assert(m < 8);
-                unsigned char c = 0xffu << (8 - m);
-                *p &= c;
-                *q &= c;
-                if (*p != *q) return false;
-            }
+        if (ban_dest[i].fam != AF_INET) continue;
+        if (ipv4_prefix_match(addr, &ban_dest[i].addr4, ban_dest[i].mask))
             return true;
-        }
+    }
+    return false;
+}
+
+static bool ipv6_is_banned(const struct in6_addr *addr)
+{
+    /* IPv4-mapped (::ffff:a.b.c.d) and deprecated IPv4-compatible (::a.b.c.d). */
+    if (IN6_IS_ADDR_V4MAPPED(addr) || IN6_IS_ADDR_V4COMPAT(addr)) {
+        struct in_addr v4;
+        memcpy(&v4, &addr->s6_addr[12], sizeof v4);
+        return ipv4_is_banned(&v4);
+    }
+    for (size_t i = 0; i < nban_dest; ++i) {
+        if (ban_dest[i].fam != AF_INET6) continue;
+        if (ipv6_prefix_match(addr, &ban_dest[i].addr6, ban_dest[i].mask))
+            return true;
+    }
+    return false;
+}
+
+static bool is_banned(const struct sockaddr *sa)
+{
+    if (!sa)
+        return true;
+    if (sa->sa_family == AF_INET) {
+        const struct sockaddr_in *sin = (const struct sockaddr_in *)sa;
+        return ipv4_is_banned(&sin->sin_addr);
+    }
+    if (sa->sa_family == AF_INET6) {
+        const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)sa;
+        return ipv6_is_banned(&sin6->sin6_addr);
     }
     return false;
 }
@@ -577,7 +638,7 @@ static void clientthread_cleanup(struct thread *t)
 
 static int parse_socksreq(struct thread *t, struct socksctx *ctx)
 {
-    char buf[1024];
+    unsigned char buf[SOCKS_BUF_SIZE];
     size_t buflen = 0;
     enum authmethod am = AM_INVALID;
     int fam = AF_UNSPEC;
@@ -587,7 +648,7 @@ static int parse_socksreq(struct thread *t, struct socksctx *ctx)
     t->client.socksver = buf[0];
     if (LIKELY(t->client.socksver == 5)) {
         while (buflen < 2) { EXTEND_BUF(); }
-        size_t n_methods = buf[1] >= 0 ? (size_t)buf[1] : 0;
+        size_t n_methods = (size_t)buf[1];
         while (buflen < 2 + n_methods) { EXTEND_BUF(); }
         for (size_t i = 0; i < n_methods; ++i) {
             if (buf[2 + i] == AM_NO_AUTH) {
@@ -614,14 +675,14 @@ static int parse_socksreq(struct thread *t, struct socksctx *ctx)
         if (am == AM_INVALID) return -1;
 
         RESET_BUF();
-        if (send_auth_response(t->client.fd, 5, am) < 0) return -1;
+        if (send_auth_response(t->client.fd, 5, (unsigned char)am) < 0) return -1;
         if (am == AM_USERNAME) {
             while (buflen < 5) { EXTEND_BUF(); }
             if (buf[0] != 1) return -1;
             unsigned ulen, plen;
-            ulen = buf[1] >= 0 ? (unsigned)buf[1] : 0;
+            ulen = (unsigned)buf[1];
             while (buflen < 2 + ulen + 2) { EXTEND_BUF(); }
-            plen = buf[2 + ulen] >= 0 ? (unsigned)buf[2 + ulen] : 0;
+            plen = (unsigned)buf[2 + ulen];
             while (buflen < 2 + ulen + 1 + plen) { EXTEND_BUF(); }
             char user[256], pass[256];
             memcpy(user, buf + 2, ulen);
@@ -629,14 +690,22 @@ static int parse_socksreq(struct thread *t, struct socksctx *ctx)
             user[ulen] = 0;
             pass[plen] = 0;
             bool allow = !strcmp(user, g_auth_user) && !strcmp(pass, g_auth_pass);
-            if (!allow) return -1;
+            if (!allow) {
+                /* RFC1929: non-zero status means failure. */
+                (void)send_auth_response(t->client.fd, 1, 0x01);
+                return -1;
+            }
             if (use_auth_ips) {
                 if (UNLIKELY(pthread_mutex_lock(&auth_ips_mtx))) abort();
-                if (!is_in_authed_list(&t->client.addr))
-                    add_auth_ip(&t->client.addr);
+                if (!add_auth_ip(&t->client.addr)) {
+                    if (UNLIKELY(pthread_mutex_unlock(&auth_ips_mtx))) abort();
+                    (void)send_auth_response(t->client.fd, 1, 0x01);
+                    return -1;
+                }
                 if (UNLIKELY(pthread_mutex_unlock(&auth_ips_mtx))) abort();
             }
-            if (send_auth_response(t->client.fd, 1, am) < 0) return -1;
+            /* RFC1929: status 0x00 = success (do not reuse AM_USERNAME). */
+            if (send_auth_response(t->client.fd, 1, 0x00) < 0) return -1;
             RESET_BUF();
         }
 
@@ -651,7 +720,7 @@ static int parse_socksreq(struct thread *t, struct socksctx *ctx)
 
         size_t minlen;
         if (buf[3] == 3) {
-            size_t l = buf[4] >= 0 ? (size_t)buf[4] : 0;
+            size_t l = (size_t)buf[4];
             minlen = 4 + 1 + l + 2;
             while (buflen < minlen) { EXTEND_BUF(); }
             memcpy(ctx->namebuf, buf + 4 + 1, l);
@@ -703,8 +772,8 @@ static int parse_socksreq(struct thread *t, struct socksctx *ctx)
         }
         size_t i = 8;
         for (;;++i) {
-            // Here we just skip the userid for now
-            if (i > BUF_SIZE / 2) return -2;
+            /* Skip userid; bound to parser buffer, not copyloop BUF_SIZE. */
+            if (i >= SOCKS_BUF_SIZE) return -2;
             while (buflen < i + 1) { EXTEND_BUF(); }
             if (buf[i] == 0) { ++i; break; }
         }
@@ -754,7 +823,10 @@ static void* clientthread(void *data) {
     }
     int family, fd, flags;
     family = family_choose(ctx.remote, &bind_addr);
-    if (UNLIKELY(is_banned(family, ctx.remote))) {
+    addr = addr_choose(ctx.remote, &bind_addr);
+    /* Ban the address we would actually connect to (MS-02 / MS-07). */
+    if (UNLIKELY(is_banned(addr->ai_addr))) {
+        ctx.errc = EC_NOT_ALLOWED;
         goto err1;
     }
     fd = socket(family, SOCK_STREAM|SOCK_CLOEXEC, 0);
@@ -770,7 +842,6 @@ static void* clientthread(void *data) {
         ctx.errc = errno_to_sockscode();
         goto err2;
     }
-    addr = addr_choose(ctx.remote, &bind_addr);
     if (UNLIKELY(connect(fd, addr->ai_addr, addr->ai_addrlen) == -1)) {
         ctx.errc = errno_to_sockscode();
         goto err2;
@@ -894,9 +965,10 @@ int main(int argc, char** argv) {
             srvrs[nsrvrs++].listenip = optarg;
             break;
         case 'p': {
-            int p = atoi(optarg);
-            if (p < 0) {
-                dprintf(2, "-p PORT can't be negative\n");
+            char *end = NULL;
+            unsigned long p = strtoul(optarg, &end, 10);
+            if (end == optarg || *end != '\0' || p < 1 || p > 65535) {
+                dprintf(2, "-p PORT must be an integer in 1..65535\n");
                 return 1;
             }
             port = (unsigned short)p;
@@ -933,10 +1005,30 @@ int main(int argc, char** argv) {
         dprintf(2, "error: -4 and -6 options cannot be used together\n");
         return 1;
     }
+    if (g_chroot && geteuid() == 0 && !g_user_id) {
+        dprintf(2, "error: -C (chroot) as root requires -u (drop uid); "
+                   "root-in-jail is not a security boundary\n");
+        return 1;
+    }
     signal(SIGPIPE, SIG_IGN);
 
+    /* Loopback / unspecified destinations (SSRF / hairpin). */
     ban_dest_add(AF_INET, "127.0.0.0", 8);
+    ban_dest_add(AF_INET, "0.0.0.0", 8);
     ban_dest_add(AF_INET6, "::1", 128);
+    ban_dest_add(AF_INET6, "::", 128);
+
+    if (!g_auth_user) {
+        for (size_t i = 0; i < nsrvrs; ++i) {
+            if (!strcmp(srvrs[i].listenip, "0.0.0.0") ||
+                !strcmp(srvrs[i].listenip, "::") ||
+                !strcmp(srvrs[i].listenip, "*")) {
+                dprintf(2, "warning: listening on %s without username/password "
+                           "authentication; this is an open SOCKS proxy\n",
+                        srvrs[i].listenip);
+            }
+        }
+    }
 
     for (size_t i = 0; i < nsrvrs; ++i) {
         if (server_setup(&srvrs[i], port)) {
@@ -951,7 +1043,12 @@ int main(int argc, char** argv) {
      * be installed into the root zone, so we use that to avoid harassing
      * DNS servers at start.
      */
-    (void) gethostbyname("fail.invalid");
+    {
+        struct addrinfo *nss_pin = NULL;
+        (void)getaddrinfo("fail.invalid", NULL, NULL, &nss_pin);
+        if (nss_pin)
+            freeaddrinfo(nss_pin);
+    }
 
     // Only initialized to silence spurious warnings.
     uid_t muonsocks_uid = getuid();
